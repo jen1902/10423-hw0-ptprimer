@@ -7,6 +7,7 @@ import torchvision.transforms as T
 from PIL import Image
 import pandas as pd
 import argparse
+import wandb
 
 img_size = (256,256)
 num_labels = 3
@@ -54,16 +55,21 @@ def get_data(batch_size):
         csv_file='./data/img_test.csv',
         transform=transform_img,
     )
+    val_data = CsvImageDataset(
+        csv_file='./data/img_val.csv',
+        transform=transform_img,
+    )
 
     train_dataloader = DataLoader(train_data, batch_size=batch_size)
     test_dataloader = DataLoader(test_data, batch_size=batch_size)
+    val_dataloader = DataLoader(val_data, batch_size=batch_size)
 
     for X, y in train_dataloader:
         print(f"Shape of X [B, C, H, W]: {X.shape}")
         print(f"Shape of y: {y.shape} {y.dtype}")
         break
     
-    return train_dataloader, test_dataloader
+    return train_dataloader, test_dataloader, val_dataloader
 
 class NeuralNetwork(nn.Module):
     def __init__(self):
@@ -99,6 +105,8 @@ def train_one_epoch(dataloader, model, loss_fn, optimizer, t):
 
         loss = loss.item() / batch_size
         current = (batch + 1) * dataloader.batch_size
+
+        #wandb.log({f"Batch training loss": loss, f"Cumulative examples": current})
         if batch % 10 == 0:
             print(f"Train loss = {loss:>7f}  [{current:>5d}/{size:>5d}]")
         
@@ -116,30 +124,68 @@ def evaluate(dataloader, dataname, model, loss_fn):
     avg_loss /= size
     correct /= size
     print(f"{dataname} accuracy = {(100*correct):>0.1f}%, {dataname} avg loss = {avg_loss:>8f}")
+    wandb.log({f"{dataname} accuracy": correct, f"{dataname} avg loss": avg_loss})
+    return correct, avg_loss
     
 def main(n_epochs, batch_size, learning_rate):
     print(f"Using {device} device")
-    train_dataloader, test_dataloader = get_data(batch_size)
+    train_dataloader, test_dataloader, val_dataloader = get_data(batch_size)
     
     model = NeuralNetwork().to(device)
     print(model)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+    train_losses = []
+    val_losses = []
+    train_accuracies = []
+    val_accuracies = []
+    epochs = []
     
     for t in range(n_epochs):
         print(f"\nEpoch {t+1}\n-------------------------------")
         train_one_epoch(train_dataloader, model, loss_fn, optimizer, t)
-        evaluate(train_dataloader, "Train", model, loss_fn)
-        evaluate(test_dataloader, "Test", model, loss_fn)
+        train_accuracy, train_loss = evaluate(train_dataloader, "Train", model, loss_fn)
+        tes_accuracy, test_loss = evaluate(test_dataloader, "Test", model, loss_fn)
+        val_accuracy, val_loss = evaluate(val_dataloader, "Validation", model, loss_fn)
+
+        # Collect data for plotting
+        epochs.append(t + 1)
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accuracies.append(train_accuracy)
+        val_accuracies.append(val_accuracy)
     print("Done!")
 
+    # Plot the losses
+    wandb.log({
+        "Loss Plot": wandb.plot.line_series(
+            xs=epochs,
+            ys=[train_losses, val_losses],
+            keys=["Train Loss", "Validation Loss"],
+            title="Train and Validation Loss Over Epochs",
+            xname="Epoch"
+        )
+    })
+
+    # Plot the accuracies
+    wandb.log({
+        "Accuracy Plot": wandb.plot.line_series(
+            xs=epochs,
+            ys=[train_accuracies, val_accuracies],
+            keys=["Train Accuracy", "Validation Accuracy"],
+            title="Train and Validation Accuracy Over Epochs",
+            xname="Epoch"
+        )
+    })
+
     # Save the model
-    torch.save(model.state_dict(), "model.pth")
-    print("Saved PyTorch Model State to model.pth")
+    torch.save(model.state_dict(), "img_classifier_model.pth")
+    print("Saved PyTorch Model State to img_classifier_model.pth")
 
     # Load the model (just for the sake of example)
     model = NeuralNetwork().to(device)
-    model.load_state_dict(torch.load("model.pth"))
+    model.load_state_dict(torch.load("img_classifier_model.pth"))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description = 'Image Classifier')
@@ -148,5 +194,12 @@ if __name__ == '__main__':
     parser.add_argument('--learning_rate', default=1e-3, help='The learning rate for the optimizer', type=float)
 
     args = parser.parse_args()
+
+    run = wandb.init(project='10423_hw0_img_classifier',
+                name = 'neural-the-narwha-plotTrainVal',
+                config=vars(args),
+                job_type='train',
+                reinit=True)
         
     main(args.n_epochs, args.batch_size, args.learning_rate)
+    wandb.finish()
