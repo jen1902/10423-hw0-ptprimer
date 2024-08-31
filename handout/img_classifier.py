@@ -11,6 +11,7 @@ import wandb
 
 img_size = (256,256)
 num_labels = 3
+label_names = {0: "parrot", 1: "narwhal", 2: "axolotl"}
 
 # Get cpu, gpu or mps device for training.
 device = (
@@ -42,10 +43,12 @@ class CsvImageDataset(Dataset):
 
 def get_data(batch_size):
     transform_img = T.Compose([
+        # T.Grayscale(num_output_channels=1),  # Convert to grayscale
         T.ToTensor(), 
         T.Resize(min(img_size[0], img_size[1]), antialias=True),  # Resize the smallest side to 256 pixels
         T.CenterCrop(img_size),  # Center crop to 256x256
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # Normalize each color dimension
+        # T.Normalize(mean=[0.5], std=[0.5]), 
         ])
     train_data = CsvImageDataset(
         csv_file='./data/img_train.csv',
@@ -89,7 +92,7 @@ class NeuralNetwork(nn.Module):
         logits = self.linear_relu_stack(x)
         return logits
 
-def train_one_epoch(dataloader, model, loss_fn, optimizer, t):
+def train_one_epoch(dataloader, model, loss_fn, optimizer):
     size = len(dataloader.dataset)
     batch_size = dataloader.batch_size
     model.train()
@@ -126,6 +129,24 @@ def evaluate(dataloader, dataname, model, loss_fn):
     print(f"{dataname} accuracy = {(100*correct):>0.1f}%, {dataname} avg loss = {avg_loss:>8f}")
     wandb.log({f"{dataname} accuracy": correct, f"{dataname} avg loss": avg_loss})
     return correct, avg_loss
+
+def log_first_batch(dataloader, model, dataset_name):
+    model.eval()
+    with torch.no_grad():
+        images, labels = next(iter(dataloader))  # Get the first batch
+        images, labels = images.to(device), labels.to(device)
+        pred_labels = model(images).argmax(1)
+        
+        wandb_images = []
+        for i in range(len(images)):
+            image = images[i].cpu()
+            true_label = labels[i].item()
+            pred_label = pred_labels[i].item()
+            caption = f"{label_names[pred_label]} / {label_names[true_label]}"
+            wandb_images.append(wandb.Image(image, caption=caption))
+            # wandb.log({f"{dataset_name} First Batch Image {i+1}": [wandb.Image(image, caption=caption)]})
+        
+        wandb.log({f"{dataset_name} First Batch Images": wandb_images}) # Log all images together as a single plot
     
 def main(n_epochs, batch_size, learning_rate):
     print(f"Using {device} device")
@@ -144,10 +165,15 @@ def main(n_epochs, batch_size, learning_rate):
     
     for t in range(n_epochs):
         print(f"\nEpoch {t+1}\n-------------------------------")
-        train_one_epoch(train_dataloader, model, loss_fn, optimizer, t)
+        train_one_epoch(train_dataloader, model, loss_fn, optimizer)
         train_accuracy, train_loss = evaluate(train_dataloader, "Train", model, loss_fn)
         tes_accuracy, test_loss = evaluate(test_dataloader, "Test", model, loss_fn)
         val_accuracy, val_loss = evaluate(val_dataloader, "Validation", model, loss_fn)
+
+        if t == n_epochs - 1:
+            log_first_batch(train_dataloader, model, "Train")
+            log_first_batch(test_dataloader, model, "Test")
+            log_first_batch(val_dataloader, model, "Validation")
 
         # Collect data for plotting
         epochs.append(t + 1)
@@ -163,7 +189,7 @@ def main(n_epochs, batch_size, learning_rate):
             xs=epochs,
             ys=[train_losses, val_losses],
             keys=["Train Loss", "Validation Loss"],
-            title="Train and Validation Loss Over Epochs",
+            title="Train and Validation Loss",
             xname="Epoch"
         )
     })
@@ -174,7 +200,7 @@ def main(n_epochs, batch_size, learning_rate):
             xs=epochs,
             ys=[train_accuracies, val_accuracies],
             keys=["Train Accuracy", "Validation Accuracy"],
-            title="Train and Validation Accuracy Over Epochs",
+            title="Train and Validation Accuracy",
             xname="Epoch"
         )
     })
@@ -196,7 +222,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     run = wandb.init(project='10423_hw0_img_classifier',
-                name = 'neural-the-narwha-plotTrainVal',
+                name = 'neural-the-narwha',
                 config=vars(args),
                 job_type='train',
                 reinit=True)
